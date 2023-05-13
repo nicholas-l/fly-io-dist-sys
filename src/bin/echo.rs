@@ -1,7 +1,7 @@
 use std::io::Write;
 
 use anyhow::Context;
-use fly_io_dist_sys::{process, Message, Node};
+use fly_io_dist_sys::{process, Init, Message, Node};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -17,7 +17,7 @@ struct EchoNode {
 }
 
 impl Node<Payload> for EchoNode {
-    fn from_init() -> anyhow::Result<Self>
+    fn from_init(_initial_message: &Init) -> anyhow::Result<Self>
     where
         Self: Sized,
     {

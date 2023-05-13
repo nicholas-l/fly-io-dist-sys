@@ -11,11 +11,7 @@ pub struct Message<T> {
 
 impl<T> Message<T> {
     pub fn new(src: String, dest: String, body: Body<T>) -> Self {
-        Message {
-            src,
-            dest,
-            body,
-        }
+        Message { src, dest, body }
     }
 
     pub fn into_reply(self, msg_id: usize, payload: Option<T>) -> Self {
@@ -57,12 +53,17 @@ impl<T> Body<T> {
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 enum PayloadInit {
-    Init,
+    Init(Init),
     InitOk,
 }
 
-pub trait Node<Payload, InjectedPayload = ()> {
-    fn from_init() -> anyhow::Result<Self>
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Init {
+    pub node_id: String,
+}
+
+pub trait Node<Payload> {
+    fn from_init(intial_input: &Init) -> anyhow::Result<Self>
     where
         Self: Sized;
 
@@ -88,6 +89,12 @@ where
         )
         .context("init message could not be deserialized")?;
 
+        let node = if let PayloadInit::Init(init) = init_msg.payload() {
+            N::from_init(init)?
+        } else {
+            return Err(anyhow::anyhow!("init message payload was not Init"));
+        };
+
         let reply = Message {
             src: init_msg.dest,
             dest: init_msg.src,
@@ -101,7 +108,7 @@ where
         serde_json::to_writer(&mut stdout, &reply).context("serialize response to init")?;
         stdout.write_all(b"\n").context("write trailing newline")?;
 
-        N::from_init()?
+        node
     };
 
     let (tx, rx) = std::sync::mpsc::channel();
@@ -112,7 +119,7 @@ where
             let line = line.context("Maelstrom input from STDIN could not be read")?;
             let input: Message<P> = serde_json::from_str(&line)
                 .context("Maelstrom input from STDIN could not be deserialized")?;
-            if let Err(_) = tx.send(input) {
+            if tx.send(input).is_err() {
                 return Ok::<_, anyhow::Error>(());
             }
         }
