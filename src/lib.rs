@@ -1,11 +1,14 @@
 use anyhow::Context;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::io::{BufRead, Write};
+use std::{
+    io::{BufRead, Write},
+    sync::mpsc::Sender,
+};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct Message<T> {
-    src: String,
-    dest: String,
+    pub src: String,
+    pub dest: String,
     pub body: Body<T>,
 }
 
@@ -60,22 +63,39 @@ enum PayloadInit {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Init {
     pub node_id: String,
+    pub node_ids: Vec<String>,
 }
 
-pub trait Node<Payload> {
-    fn from_init(intial_input: &Init) -> anyhow::Result<Self>
+pub enum Event<Payload, InternalPayload = ()> {
+    ExternalMessage(Message<Payload>),
+    InternalMessage(InternalPayload),
+    Shutdown,
+}
+
+pub trait Node<Payload, InternalMessage = ()> {
+    fn from_init(
+        intial_input: &Init,
+        tx: Sender<Event<Payload, InternalMessage>>,
+    ) -> anyhow::Result<Self>
     where
         Self: Sized;
 
-    fn step(&mut self, input: Message<Payload>, output: &mut impl Write) -> anyhow::Result<()>;
+    fn step(
+        &mut self,
+        input: Event<Payload, InternalMessage>,
+        output: &mut impl Write,
+    ) -> anyhow::Result<()>;
 }
 
-pub fn process<N, P>() -> anyhow::Result<()>
+pub fn process<N, P, IM>() -> anyhow::Result<()>
 where
     P: DeserializeOwned + Send + 'static,
-    N: Node<P>,
+    N: Node<P, IM>,
+    IM: Send + 'static,
 {
     let mut stdout = std::io::stdout().lock();
+
+    let (tx, rx) = std::sync::mpsc::channel();
 
     let mut node = {
         let stdin = std::io::stdin();
@@ -90,7 +110,7 @@ where
         .context("init message could not be deserialized")?;
 
         let node = if let PayloadInit::Init(init) = init_msg.payload() {
-            N::from_init(init)?
+            N::from_init(init, tx.clone())?
         } else {
             return Err(anyhow::anyhow!("init message payload was not Init"));
         };
@@ -111,15 +131,13 @@ where
         node
     };
 
-    let (tx, rx) = std::sync::mpsc::channel();
-
     let jh = std::thread::spawn(move || {
         let stdin = std::io::stdin().lock();
         for line in stdin.lines() {
             let line = line.context("Maelstrom input from STDIN could not be read")?;
             let input: Message<P> = serde_json::from_str(&line)
                 .context("Maelstrom input from STDIN could not be deserialized")?;
-            if tx.send(input).is_err() {
+            if tx.send(Event::ExternalMessage(input)).is_err() {
                 return Ok::<_, anyhow::Error>(());
             }
         }

@@ -1,7 +1,7 @@
-use std::io::Write;
+use std::{io::Write, sync::mpsc::Sender};
 
 use anyhow::Context;
-use fly_io_dist_sys::{process, Init, Message, Node};
+use fly_io_dist_sys::{process, Event, Init, Node};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -18,7 +18,7 @@ struct UniqueNode {
 }
 
 impl Node<Payload> for UniqueNode {
-    fn from_init(intial_input: &Init) -> anyhow::Result<Self>
+    fn from_init(intial_input: &Init, _tx: Sender<Event<Payload>>) -> anyhow::Result<Self>
     where
         Self: Sized,
     {
@@ -28,29 +28,35 @@ impl Node<Payload> for UniqueNode {
         })
     }
 
-    fn step(&mut self, input: Message<Payload>, output: &mut impl Write) -> anyhow::Result<()> {
-        let payload = match input.payload() {
-            Payload::Generate => {
-                let message_id = self.message_id;
-                self.message_id += 1;
-                Payload::GenerateOk {
-                    id: format!("{}-{}", self.node_id, message_id),
-                }
+    fn step(&mut self, input: Event<Payload>, output: &mut impl Write) -> anyhow::Result<()> {
+        match input {
+            Event::ExternalMessage(input) => {
+                let payload = match input.payload() {
+                    Payload::Generate => {
+                        let message_id = self.message_id;
+                        self.message_id += 1;
+                        Payload::GenerateOk {
+                            id: format!("{}-{}", self.node_id, message_id),
+                        }
+                    }
+                    Payload::GenerateOk { .. } => unreachable!(),
+                };
+                let reply = input.into_reply(self.message_id, Some(payload));
+                serde_json::to_writer(&mut *output, &reply)?;
+                output.write_all(b"\n").context("write trailing newline")?;
             }
-            Payload::GenerateOk { .. } => {
-                unreachable!()
+            Event::InternalMessage(_) => {
+                panic!("We do not support internal messages in this node type.")
             }
-        };
-        let reply = input.into_reply(self.message_id, Some(payload));
-        dbg!(&reply);
-        serde_json::to_writer(&mut *output, &reply)?;
-        output.write_all(b"\n").context("write trailing newline")?;
+            Event::Shutdown => todo!(),
+        }
+
         Ok(())
     }
 }
 
 fn main() -> anyhow::Result<()> {
-    process::<UniqueNode, Payload>()
+    process::<UniqueNode, Payload, _>()
 }
 
 #[cfg(test)]

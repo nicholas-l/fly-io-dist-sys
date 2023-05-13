@@ -1,7 +1,7 @@
-use std::io::Write;
+use std::{io::Write, sync::mpsc::Sender};
 
 use anyhow::Context;
-use fly_io_dist_sys::{process, Init, Message, Node};
+use fly_io_dist_sys::{process, Event, Init, Node};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -17,35 +17,43 @@ struct EchoNode {
 }
 
 impl Node<Payload> for EchoNode {
-    fn from_init(_initial_message: &Init) -> anyhow::Result<Self>
+    fn from_init(_initial_message: &Init, _tx: Sender<Event<Payload>>) -> anyhow::Result<Self>
     where
         Self: Sized,
     {
         Ok(Self { message_id: 0 })
     }
 
-    fn step(&mut self, input: Message<Payload>, output: &mut impl Write) -> anyhow::Result<()> {
-        let payload = match input.payload() {
-            Payload::Echo { echo } => Payload::EchoOk { echo: echo.into() },
-            Payload::EchoOk { .. } => {
-                unreachable!()
+    fn step(&mut self, input: Event<Payload>, output: &mut impl Write) -> anyhow::Result<()> {
+        match input {
+            Event::ExternalMessage(input) => {
+                let payload = match input.payload() {
+                    Payload::Echo { echo } => Payload::EchoOk { echo: echo.into() },
+                    Payload::EchoOk { .. } => {
+                        unreachable!()
+                    }
+                };
+                let reply = input.into_reply(self.message_id, Some(payload));
+                serde_json::to_writer(&mut *output, &reply)?;
+                output.write_all(b"\n").context("write trailing newline")?;
             }
-        };
-        let reply = input.into_reply(self.message_id, Some(payload));
-        dbg!(&reply);
-        serde_json::to_writer(&mut *output, &reply)?;
-        output.write_all(b"\n").context("write trailing newline")?;
+            Event::InternalMessage(_) => {
+                panic!("We do not support internal messages in this node type.")
+            }
+            Event::Shutdown => todo!(),
+        }
+
         Ok(())
     }
 }
 
 fn main() -> anyhow::Result<()> {
-    process::<EchoNode, Payload>()
+    process::<EchoNode, Payload, _>()
 }
 
 #[cfg(test)]
 mod tests {
-    use fly_io_dist_sys::Body;
+    use fly_io_dist_sys::{Body, Message};
 
     use super::*;
 
@@ -62,7 +70,7 @@ mod tests {
         );
         let input = Message::new("testsrc".into(), "testdest".into(), body);
 
-        let res = node.step(input, &mut output);
+        let res = node.step(Event::ExternalMessage(input), &mut output);
 
         assert!(res.is_ok());
 
